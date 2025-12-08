@@ -14,6 +14,7 @@ def home():
 
 
 def run_scraper(keyword: str):
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
@@ -21,11 +22,26 @@ def run_scraper(keyword: str):
         page.goto(UKI_URL, timeout=60000)
         page.wait_for_selector("a[href*='MPListing?lid']", timeout=60000)
 
-        # Scroll to load all lazy-loaded products
-        for _ in range(10):
+        # ---------------------------
+        # 🔥 Infinite Scroll Fix
+        # ---------------------------
+        last_height = 0
+        for _ in range(30):  # up to 30 scroll cycles
             page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(1200)  # allow lazy-loading to finish
 
+            new_height = page.evaluate("document.body.scrollHeight")
+
+            if new_height == last_height:
+                break  # no more new content loading
+
+            last_height = new_height
+
+        page.wait_for_timeout(2000)  # final wait for any React loads
+
+        # ---------------------------
+        # 🔍 Parse HTML
+        # ---------------------------
         soup = BeautifulSoup(page.content(), "html.parser")
         browser.close()
 
@@ -70,8 +86,11 @@ def search(keywords: str):
         results = run_scraper(kw)
         all_results.extend(results)
 
-    # Remove duplicates using URL as a unique key
-    unique_results = {item['url']: item for item in all_results}.values()
+    # Remove duplicates using URL as unique key
+    unique_results = {item["url"]: item for item in all_results}.values()
 
     return list(unique_results)
 
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
