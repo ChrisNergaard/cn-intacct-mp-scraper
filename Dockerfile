@@ -3,9 +3,10 @@ FROM python:3.10
 WORKDIR /app
 
 COPY requirements.txt .
+
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright and the Chromium browser
+# Install the Chromium browser via Playwright
 RUN python -m playwright install --with-deps chromium
 
 COPY . .
