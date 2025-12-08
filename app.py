@@ -8,12 +8,14 @@ BASE_URL = "https://marketplace.intacct.com"
 
 app = FastAPI()
 
-# ✅ ADD THIS HEALTH ENDPOINT (Render needs this!!)
 @app.get("/")
 def home():
     return {"status": "ok"}
 
-def run_scraper(keyword: str):
+
+def run_scraper(keywords: list[str]):
+    keywords = [k.lower() for k in keywords]
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
@@ -44,7 +46,11 @@ def run_scraper(keyword: str):
                     except:
                         provider = ""
 
-            if keyword.lower() in name.lower():
+            name_lower = name.lower()
+            provider_lower = provider.lower()
+
+            # --- MATCH ALL KEYWORDS (AND LOGIC) ---
+            if all(k in name_lower or k in provider_lower for k in keywords):
                 results.append({
                     "name": name,
                     "provider": provider,
@@ -56,8 +62,9 @@ def run_scraper(keyword: str):
 
 
 @app.get("/search")
-def search(keyword: str):
-    return run_scraper(keyword)
+def search(keywords: str):
+    keyword_list = [k.strip() for k in keywords.split(",")]
+    return run_scraper(keyword_list)
 
 
 if __name__ == "__main__":
