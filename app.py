@@ -13,15 +13,18 @@ def home():
     return {"status": "ok"}
 
 
-def run_scraper(keywords: list[str]):
-    keywords = [k.lower() for k in keywords]
-
+def run_scraper(keyword: str):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
         page.goto(UKI_URL, timeout=60000)
         page.wait_for_selector("a[href*='MPListing?lid']", timeout=60000)
+
+        # Scroll to load all lazy-loaded products
+        for _ in range(10):
+            page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+            page.wait_for_timeout(800)
 
         soup = BeautifulSoup(page.content(), "html.parser")
         browser.close()
@@ -46,11 +49,7 @@ def run_scraper(keywords: list[str]):
                     except:
                         provider = ""
 
-            name_lower = name.lower()
-            provider_lower = provider.lower()
-
-            # --- MATCH ALL KEYWORDS (AND LOGIC) ---
-            if all(k in name_lower or k in provider_lower for k in keywords):
+            if keyword.lower() in name.lower():
                 results.append({
                     "name": name,
                     "provider": provider,
@@ -64,8 +63,15 @@ def run_scraper(keywords: list[str]):
 @app.get("/search")
 def search(keywords: str):
     keyword_list = [k.strip() for k in keywords.split(",")]
-    return run_scraper(keyword_list)
 
+    all_results = []
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    for kw in keyword_list:
+        results = run_scraper(kw)
+        all_results.extend(results)
+
+    # Remove duplicates using URL as a unique key
+    unique_results = {item['url']: item for item in all_results}.values()
+
+    return list(unique_results)
+
