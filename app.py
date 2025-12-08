@@ -8,6 +8,11 @@ BASE_URL = "https://marketplace.intacct.com"
 
 app = FastAPI()
 
+# ✅ ADD THIS HEALTH ENDPOINT (Render needs this!!)
+@app.get("/")
+def home():
+    return {"status": "ok"}
+
 def run_scraper(keyword: str):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
