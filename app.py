@@ -3,7 +3,7 @@ from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 import uvicorn
 
-MARKETPLACE_URL = "https://marketplace.intacct.com/marketplace"
+ALL_LISTINGS_URL = "https://marketplace.intacct.com/marketplace?category=All"
 BASE_URL = "https://marketplace.intacct.com"
 
 app = FastAPI()
@@ -19,11 +19,11 @@ def run_scraper(keyword: str):
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # Load the FULL marketplace
-        page.goto(MARKETPLACE_URL, timeout=60000)
+        # Load the FULL ALL-CATEGORY Marketplace
+        page.goto(ALL_LISTINGS_URL, timeout=60000)
         page.wait_for_selector("a[href*='MPListing?lid']", timeout=60000)
 
-        # Infinite scroll to load ALL listings
+        # Scroll through all items
         last_height = 0
         while True:
             page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
@@ -34,23 +34,21 @@ def run_scraper(keyword: str):
                 break
             last_height = new_height
 
-        # Parse final HTML after all items loaded
+        # Parse
         soup = BeautifulSoup(page.content(), "html.parser")
         browser.close()
 
-        # Find all MP listings across ALL categories/regions
+        # Extract all Marketplace listing cards
         links = soup.find_all("a", href=lambda h: h and "MPListing?lid" in h)
 
         results = []
-
         for link in links:
             name = link.get_text(strip=True)
             url = BASE_URL + link["href"]
 
+            # Try to extract provider
             container = link.find_parent()
             provider = ""
-
-            # Extract provider name (simple heuristic)
             if container:
                 text = container.get_text(" ", strip=True)
                 if "by:" in text.lower():
@@ -59,7 +57,7 @@ def run_scraper(keyword: str):
                     except:
                         provider = ""
 
-            # Keyword match ONLY on title
+            # Match keyword in name only
             if keyword.lower() in name.lower():
                 results.append({
                     "name": name,
