@@ -1,5 +1,6 @@
+import asyncio
 from fastapi import FastAPI
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 import uvicorn
 import time
@@ -11,29 +12,29 @@ app = FastAPI()
 
 
 @app.get("/")
-def home():
+async def home():
     return {"status": "ok"}
 
 
 # ----------------------------------------------------
-# Helper: Load CLEAN TEXT + Approved Countries
+# Helper: Load CLEAN TEXT + Approved Countries (ASYNC)
 # ----------------------------------------------------
-def load_listing_text_and_countries(url: str):
+async def load_detail_page(url: str):
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
 
-            page.goto(url, timeout=60000)
-            page.wait_for_load_state("networkidle")
+            await page.goto(url, timeout=60000)
+            await page.wait_for_load_state("networkidle")
 
-            html = page.content()
-            browser.close()
+            html = await page.content()
+            await browser.close()
 
             soup = BeautifulSoup(html, "html.parser")
             clean_text = soup.get_text(" ", strip=True)
 
-            # Extract Approved Countries
+            # Extract approved countries
             approved = []
             marker = "Integration Approved Countries:"
             if marker in clean_text:
@@ -47,64 +48,61 @@ def load_listing_text_and_countries(url: str):
 
 
 # ----------------------------------------------------
-# Main Scraper: Fetch ALL listings on the UKI page
+# Main Scraper (ASYNC)
 # ----------------------------------------------------
-def run_scraper(keyword: str):
+async def run_scraper(keyword: str):
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
 
-        page.goto(UKI_URL, timeout=60000)
-        page.wait_for_selector("a[href*='MPListing?lid']", timeout=60000)
+        await page.goto(UKI_URL, timeout=60000)
+        await page.wait_for_selector("a[href*='MPListing?lid']", timeout=60000)
 
-        # Scroll until no more new content loads
+        # Auto-scroll until no more results
         prev_height = 0
         while True:
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1)
-            curr_height = page.evaluate("document.body.scrollHeight")
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+            await asyncio.sleep(1)
+            curr_height = await page.evaluate("document.body.scrollHeight")
             if curr_height == prev_height:
                 break
             prev_height = curr_height
 
-        # Parse page
-        soup = BeautifulSoup(page.content(), "html.parser")
-        browser.close()
+        soup = BeautifulSoup(await page.content(), "html.parser")
+        await browser.close()
 
-        # All listings
         links = soup.find_all("a", href=lambda h: h and "MPListing?lid" in h)
-
         results = []
 
         for link in links:
             name = link.get_text(strip=True)
             url = BASE_URL + link["href"]
 
+            # keyword filter
             if keyword.lower() not in name.lower():
                 continue
 
-            # Load details (clean text + approved countries)
-            clean_text, approved_countries = load_listing_text_and_countries(url)
+            # load clean text + country list
+            text, approved = await load_detail_page(url)
 
             results.append({
                 "name": name,
                 "provider": "",
                 "url": url,
-                "approved_countries": approved_countries,
-                "text": clean_text,
+                "approved_countries": approved,
+                "text": text
             })
 
         return results
 
 
 # ----------------------------------------------------
-# FASTAPI Endpoint
+# API Route (ASYNC)
 # ----------------------------------------------------
 @app.get("/search")
-def search(keyword: str):
-    results = run_scraper(keyword)
-    return results
+async def search(keyword: str):
+    return await run_scraper(keyword)
 
 
 if __name__ == "__main__":
