@@ -2,133 +2,94 @@ from fastapi import FastAPI
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 import uvicorn
-import time
 
 UKI_URL = "https://marketplace.intacct.com/marketplace?category=a2C0H000005kXtUUAU"
 BASE_URL = "https://marketplace.intacct.com"
 
 app = FastAPI()
 
+# Health check for Render
 @app.get("/")
 def home():
     return {"status": "ok"}
 
-# ------------------------------------------------------------
-# Helper: scrape ALL UK marketplace listings
-# ------------------------------------------------------------
-def load_full_marketplace(page):
-    """Scrolls the page repeatedly until all lazy-loaded items appear."""
-    previous_height = 0
 
-    for _ in range(20):  # high enough to load everything
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        time.sleep(0.8)
-
-        new_height = page.evaluate("document.body.scrollHeight")
-        if new_height == previous_height:
-            break  # reached the end
-
-        previous_height = new_height
-
-
-# ------------------------------------------------------------
-# Helper: extract Approved Countries from a detail page
-# ------------------------------------------------------------
-def get_approved_countries(detail_url, p):
-    """Fetches detail page & extracts Approved Countries field."""
+def scrape_listing_details(listing_url: str):
+    """
+    Loads a listing detail page and extracts FULL HTML (Option B).
+    """
     try:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(detail_url, timeout=60000)
-        page.wait_for_timeout(1000)
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
 
-        html = page.content()
-        soup = BeautifulSoup(html, "html.parser")
-        browser.close()
+            page.goto(listing_url, timeout=60000)
+            page.wait_for_load_state("networkidle")
 
-        label = soup.find("span", string=lambda text: text and "Integration Approved Countries" in text)
-        if not label:
-            return []
+            # Dump entire HTML for AI processing
+            full_html = page.content()
 
-        # Next sibling contains the actual value
-        value = label.find_next("span")
-        if not value:
-            return []
+            browser.close()
+            return full_html
 
-        return [c.strip() for c in value.text.split(";")]
-
-    except:
-        return []
+    except Exception as e:
+        return f"Error loading details: {e}"
 
 
-# ------------------------------------------------------------
-# Main scraper
-# ------------------------------------------------------------
-def scrape_marketplace(keywords, region):
-    clean_keywords = [k.lower() for k in keywords]
-    region = region.lower() if region else None
-
+def run_scraper(keyword: str):
+    """
+    Loads the UK marketplace page, scrolls to load all items,
+    finds all listings, filters by keyword, then loads full detail pages.
+    """
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # Load marketplace + scroll
         page.goto(UKI_URL, timeout=60000)
         page.wait_for_selector("a[href*='MPListing?lid']", timeout=60000)
-        load_full_marketplace(page)
+
+        # Scroll to load ALL products
+        for _ in range(15):
+            page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1000)
 
         soup = BeautifulSoup(page.content(), "html.parser")
+
         browser.close()
 
+        # Find all listing links
         links = soup.find_all("a", href=lambda h: h and "MPListing?lid" in h)
 
         results = []
 
-        # Process each listing
         for link in links:
             name = link.get_text(strip=True)
             detail_url = BASE_URL + link["href"]
-            container = link.find_parent()
 
-            provider = ""
-            if container:
-                text_block = container.get_text(" ", strip=True)
-                if "by:" in text_block.lower():
-                    try:
-                        provider = text_block.split("by:")[1].split()[0]
-                    except:
-                        provider = ""
+            # Keyword match on NAME ONLY (simple)
+            if keyword.lower() in name.lower():
+                print(f"Matched: {name}")
 
-            # Keyword Filter
-            if not any(kw in name.lower() for kw in clean_keywords):
-                continue
+                # Load full detail page HTML
+                raw_html = scrape_listing_details(detail_url)
 
-            # Region Filter — requires detail page lookup
-            approved_countries = get_approved_countries(detail_url, p)
+                results.append({
+                    "name": name,
+                    "provider": "",   # Optional enhancement later
+                    "url": detail_url,
+                    "raw_html": raw_html
+                })
 
-            if region:
-                if not any(region in c.lower() for c in approved_countries):
-                    continue
-
-            results.append({
-                "name": name,
-                "provider": provider,
-                "url": detail_url,
-                "approved_countries": approved_countries
-            })
-
-        # Deduplicate using URL
-        results = list({item["url"]: item for item in results}.values())
         return results
 
 
-# ------------------------------------------------------------
-# API Endpoint
-# ------------------------------------------------------------
 @app.get("/search")
-def search(keywords: str, region: str = None):
-    keyword_list = [k.strip() for k in keywords.split(",")]
-    return scrape_marketplace(keyword_list, region)
+def search(keyword: str):
+    """
+    Example:
+    /search?keyword=AP Automation
+    """
+    return run_scraper(keyword)
 
 
 if __name__ == "__main__":
