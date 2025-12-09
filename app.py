@@ -1,203 +1,135 @@
 from fastapi import FastAPI
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
-import re
 import uvicorn
+import time
 
-# -------------------------------------------------------
-# Correct GLOBAL Marketplace URL
-# This loads ALL products, not just a UI wrapper.
-# -------------------------------------------------------
-GLOBAL_URL = "https://marketplace.intacct.com/marketplace?category=all"
+UKI_URL = "https://marketplace.intacct.com/marketplace?category=a2C0H000005kXtUUAU"
 BASE_URL = "https://marketplace.intacct.com"
 
 app = FastAPI()
 
-
 @app.get("/")
 def home():
-    return {"status": "online", "message": "Intacct Marketplace Scraper running"}
+    return {"status": "ok"}
+
+# ------------------------------------------------------------
+# Helper: scrape ALL UK marketplace listings
+# ------------------------------------------------------------
+def load_full_marketplace(page):
+    """Scrolls the page repeatedly until all lazy-loaded items appear."""
+    previous_height = 0
+
+    for _ in range(20):  # high enough to load everything
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        time.sleep(0.8)
+
+        new_height = page.evaluate("document.body.scrollHeight")
+        if new_height == previous_height:
+            break  # reached the end
+
+        previous_height = new_height
 
 
-# -------------------------------------------------------
-# Extract clean keyword(s) from natural language
-# -------------------------------------------------------
-def extract_keywords(query: str):
-    query = query.lower()
-
-    # Common business terms to remove
-    noise_words = [
-        "what", "which", "is", "for", "good", "fit", "in", "the",
-        "solution", "partner", "app", "application", "marketplace",
-        "mpp", "recommend", "best"
-    ]
-
-    cleaned = " ".join([w for w in query.split() if w not in noise_words])
-    return cleaned.strip()
-
-
-# -------------------------------------------------------
-# Extract region from a natural-language query
-# -------------------------------------------------------
-def extract_region(query: str):
-    region_map = {
-        "uk": "United Kingdom",
-        "united kingdom": "United Kingdom",
-        "usa": "United States",
-        "us": "United States",
-        "united states": "United States",
-        "canada": "Canada",
-        "ca": "Canada",
-        "australia": "Australia",
-        "au": "Australia",
-        "ireland": "Ireland"
-    }
-
-    query_lower = query.lower()
-
-    for key, value in region_map.items():
-        if key in query_lower:
-            return value
-
-    return None  # No region detected
-
-
-# -------------------------------------------------------
-# Extract integration-approved countries from detail page
-# -------------------------------------------------------
-def extract_countries_from_detail(page):
+# ------------------------------------------------------------
+# Helper: extract Approved Countries from a detail page
+# ------------------------------------------------------------
+def get_approved_countries(detail_url, p):
+    """Fetches detail page & extracts Approved Countries field."""
     try:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(detail_url, timeout=60000)
+        page.wait_for_timeout(1000)
+
         html = page.content()
         soup = BeautifulSoup(html, "html.parser")
+        browser.close()
 
-        section = soup.find(string=re.compile("Integration Approved Countries", re.I))
-
-        if not section:
+        label = soup.find("span", string=lambda text: text and "Integration Approved Countries" in text)
+        if not label:
             return []
 
-        text_block = section.find_parent().get_text(" ", strip=True)
+        # Next sibling contains the actual value
+        value = label.find_next("span")
+        if not value:
+            return []
 
-        match = re.search(r"Integration Approved Countries:\s*(.*)", text_block, re.I)
-        if match:
-            countries_str = match.group(1)
-            countries = [c.strip() for c in countries_str.split(";")]
-            return countries
+        return [c.strip() for c in value.text.split(";")]
 
-    except Exception:
-        pass
-
-    return []
+    except:
+        return []
 
 
-# -------------------------------------------------------
-# Scrape ALL products globally, then filter locally
-# -------------------------------------------------------
-def run_scraper(keywords: list, region_filter: str | None):
-
-    all_results = []
+# ------------------------------------------------------------
+# Main scraper
+# ------------------------------------------------------------
+def scrape_marketplace(keywords, region):
+    clean_keywords = [k.lower() for k in keywords]
+    region = region.lower() if region else None
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        print("Opening Marketplace...")
-        page.goto(GLOBAL_URL, timeout=60000)
-        page.wait_for_timeout(2000)
-
-        # Load more products by scrolling OR clicking Load More button
-        for _ in range(20):
-            page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-            page.wait_for_timeout(1200)
-
-            # Click "Load More" button if it exists
-            try:
-                page.locator("button", has_text="Load More").click(timeout=1000)
-            except:
-                pass
+        # Load marketplace + scroll
+        page.goto(UKI_URL, timeout=60000)
+        page.wait_for_selector("a[href*='MPListing?lid']", timeout=60000)
+        load_full_marketplace(page)
 
         soup = BeautifulSoup(page.content(), "html.parser")
-        browser_context = browser
+        browser.close()
 
-        # Find all listing <a> links
         links = soup.find_all("a", href=lambda h: h and "MPListing?lid" in h)
 
-        print(f"Found {len(links)} total marketplace listings.")
+        results = []
 
+        # Process each listing
         for link in links:
             name = link.get_text(strip=True)
             detail_url = BASE_URL + link["href"]
+            container = link.find_parent()
 
-            # Only keep items matching ANY keyword
-            if not any(k.lower() in name.lower() for k in keywords):
+            provider = ""
+            if container:
+                text_block = container.get_text(" ", strip=True)
+                if "by:" in text_block.lower():
+                    try:
+                        provider = text_block.split("by:")[1].split()[0]
+                    except:
+                        provider = ""
+
+            # Keyword Filter
+            if not any(kw in name.lower() for kw in clean_keywords):
                 continue
 
-            # Open detail page to extract region availability
-            detail_page = browser_context.new_page()
-            detail_page.goto(detail_url, timeout=60000)
-            detail_page.wait_for_timeout(1500)
+            # Region Filter — requires detail page lookup
+            approved_countries = get_approved_countries(detail_url, p)
 
-            countries = extract_countries_from_detail(detail_page)
-            detail_page.close()
-
-            # Apply region filtering if specified
-            if region_filter:
-                if region_filter not in countries:
+            if region:
+                if not any(region in c.lower() for c in approved_countries):
                     continue
 
-            all_results.append({
+            results.append({
                 "name": name,
+                "provider": provider,
                 "url": detail_url,
-                "countries": countries
+                "approved_countries": approved_countries
             })
 
-        browser.close()
-
-    # Remove duplicates by URL
-    unique = {item["url"]: item for item in all_results}
-
-    return list(unique.values())
+        # Deduplicate using URL
+        results = list({item["url"]: item for item in results}.values())
+        return results
 
 
-# -------------------------------------------------------
-# Structured API endpoint
-# Example:
-#   /search?keywords=ap automation,cash&region=United Kingdom
-# -------------------------------------------------------
+# ------------------------------------------------------------
+# API Endpoint
+# ------------------------------------------------------------
 @app.get("/search")
-def search(keywords: str, region: str | None = None):
+def search(keywords: str, region: str = None):
     keyword_list = [k.strip() for k in keywords.split(",")]
-    results = run_scraper(keyword_list, region)
-    return results
+    return scrape_marketplace(keyword_list, region)
 
 
-# -------------------------------------------------------
-# Natural language API endpoint for Teams agent
-# Example:
-#   /ask?q=What MPP is good for AP Automation in the UK?
-# -------------------------------------------------------
-@app.get("/ask")
-def ask(q: str):
-    keywords = extract_keywords(q)
-    region = extract_region(q)
-
-    if not keywords:
-        return {"error": "Could not detect keywords from question"}
-
-    keyword_list = [keywords]
-
-    results = run_scraper(keyword_list, region)
-
-    return {
-        "query": q,
-        "keywords_used": keyword_list,
-        "region_used": region,
-        "count": len(results),
-        "results": results
-    }
-
-
-# -------------------------------------------------------
-# Local run
-# -------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
