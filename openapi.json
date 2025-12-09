@@ -1,0 +1,68 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "CN Intacct Marketplace Scraper",
+    "version": "1.0.0",
+    "description": "Searches the Sage Intacct Marketplace (UKI view) by keyword and returns listing HTML for Copilot to analyse."
+  },
+  "servers": [
+    {
+      "url": "https://cn-intacct-mp-scraper.onrender.com"
+    }
+  ],
+  "paths": {
+    "/search": {
+      "get": {
+        "summary": "Search Intacct Marketplace by keyword",
+        "description": "Returns a list of marketplace listings whose name matches the given keyword. Each result includes full HTML of the listing detail page as raw_html.",
+        "parameters": [
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "example": "AP Automation"
+            },
+            "description": "Keyword or phrase describing the solution you want to search for, e.g. 'AP Automation', 'Cash Flow', 'OCR'."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful search",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "description": "Listing name as shown in the marketplace."
+                      },
+                      "provider": {
+                        "type": "string",
+                        "description": "Partner/vendor name when available."
+                      },
+                      "url": {
+                        "type": "string",
+                        "format": "uri",
+                        "description": "Public URL of the listing."
+                      },
+                      "raw_html": {
+                        "type": "string",
+                        "description": "Full HTML content of the listing detail page. Copilot should read this to understand capabilities, benefits and approved countries."
+                      }
+                    },
+                    "required": ["name", "url", "raw_html"]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
