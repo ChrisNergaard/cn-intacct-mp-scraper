@@ -1,108 +1,78 @@
-import asyncio
 from fastapi import FastAPI
-from playwright.async_api import async_playwright
+from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 import uvicorn
-import time
 
-UKI_URL = "https://marketplace.intacct.com/marketplace?category=a2C0H000005kXtUUAU"
+MARKETPLACE_URL = "https://marketplace.intacct.com/marketplace"
 BASE_URL = "https://marketplace.intacct.com"
 
 app = FastAPI()
 
 
 @app.get("/")
-async def home():
+def home():
     return {"status": "ok"}
 
 
-# ----------------------------------------------------
-# Helper: Load CLEAN TEXT + Approved Countries (ASYNC)
-# ----------------------------------------------------
-async def load_detail_page(url: str):
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
+def run_scraper(keyword: str):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
 
-            await page.goto(url, timeout=60000)
-            await page.wait_for_load_state("networkidle")
+        # Load the FULL marketplace
+        page.goto(MARKETPLACE_URL, timeout=60000)
+        page.wait_for_selector("a[href*='MPListing?lid']", timeout=60000)
 
-            html = await page.content()
-            await browser.close()
-
-            soup = BeautifulSoup(html, "html.parser")
-            clean_text = soup.get_text(" ", strip=True)
-
-            # Extract approved countries
-            approved = []
-            marker = "Integration Approved Countries:"
-            if marker in clean_text:
-                after = clean_text.split(marker, 1)[1]
-                approved = [c.strip() for c in after.split("\n")[0].split(";")]
-
-            return clean_text, approved
-
-    except Exception as e:
-        return f"Error loading page: {str(e)}", []
-
-
-# ----------------------------------------------------
-# Main Scraper (ASYNC)
-# ----------------------------------------------------
-async def run_scraper(keyword: str):
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-
-        await page.goto(UKI_URL, timeout=60000)
-        await page.wait_for_selector("a[href*='MPListing?lid']", timeout=60000)
-
-        # Auto-scroll until no more results
-        prev_height = 0
+        # Infinite scroll to load ALL listings
+        last_height = 0
         while True:
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-            await asyncio.sleep(1)
-            curr_height = await page.evaluate("document.body.scrollHeight")
-            if curr_height == prev_height:
+            page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1000)
+
+            new_height = page.evaluate("document.body.scrollHeight")
+            if new_height == last_height:
                 break
-            prev_height = curr_height
+            last_height = new_height
 
-        soup = BeautifulSoup(await page.content(), "html.parser")
-        await browser.close()
+        # Parse final HTML after all items loaded
+        soup = BeautifulSoup(page.content(), "html.parser")
+        browser.close()
 
+        # Find all MP listings across ALL categories/regions
         links = soup.find_all("a", href=lambda h: h and "MPListing?lid" in h)
+
         results = []
 
         for link in links:
             name = link.get_text(strip=True)
             url = BASE_URL + link["href"]
 
-            # keyword filter
-            if keyword.lower() not in name.lower():
-                continue
+            container = link.find_parent()
+            provider = ""
 
-            # load clean text + country list
-            text, approved = await load_detail_page(url)
+            # Extract provider name (simple heuristic)
+            if container:
+                text = container.get_text(" ", strip=True)
+                if "by:" in text.lower():
+                    try:
+                        provider = text.split("by:")[1].split()[0]
+                    except:
+                        provider = ""
 
-            results.append({
-                "name": name,
-                "provider": "",
-                "url": url,
-                "approved_countries": approved,
-                "text": text
-            })
+            # Keyword match ONLY on title
+            if keyword.lower() in name.lower():
+                results.append({
+                    "name": name,
+                    "provider": provider,
+                    "url": url
+                })
 
         return results
 
 
-# ----------------------------------------------------
-# API Route (ASYNC)
-# ----------------------------------------------------
 @app.get("/search")
-async def search(keyword: str):
-    return await run_scraper(keyword)
+def search(keyword: str):
+    return run_scraper(keyword)
 
 
 if __name__ == "__main__":
