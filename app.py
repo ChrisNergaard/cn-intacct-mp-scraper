@@ -1,5 +1,6 @@
+import asyncio
 from fastapi import FastAPI
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 import uvicorn
 
@@ -8,56 +9,52 @@ BASE_URL = "https://marketplace.intacct.com"
 
 app = FastAPI()
 
-# Health check for Render
+
 @app.get("/")
 def home():
     return {"status": "ok"}
 
 
-def scrape_listing_details(listing_url: str):
+async def scrape_listing_details(listing_url: str):
     """
-    Loads a listing detail page and extracts FULL HTML (Option B).
+    Loads a listing detail page and returns full HTML.
     """
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
 
-            page.goto(listing_url, timeout=60000)
-            page.wait_for_load_state("networkidle")
+            await page.goto(listing_url, timeout=60000)
+            await page.wait_for_load_state("networkidle")
 
-            # Dump entire HTML for AI processing
-            full_html = page.content()
-
-            browser.close()
-            return full_html
+            html = await page.content()
+            await browser.close()
+            return html
 
     except Exception as e:
         return f"Error loading details: {e}"
 
 
-def run_scraper(keyword: str):
+async def run_scraper(keyword: str):
     """
-    Loads the UK marketplace page, scrolls to load all items,
-    finds all listings, filters by keyword, then loads full detail pages.
+    Scrapes the UK marketplace, scrolls to load all listings,
+    extracts matching items, then loads the full HTML for each.
     """
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
 
-        page.goto(UKI_URL, timeout=60000)
-        page.wait_for_selector("a[href*='MPListing?lid']", timeout=60000)
+        await page.goto(UKI_URL, timeout=60000)
+        await page.wait_for_selector("a[href*='MPListing?lid']", timeout=60000)
 
-        # Scroll to load ALL products
+        # Scroll to load everything
         for _ in range(15):
-            page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-            page.wait_for_timeout(1000)
+            await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1000)
 
-        soup = BeautifulSoup(page.content(), "html.parser")
+        soup = BeautifulSoup(await page.content(), "html.parser")
+        await browser.close()
 
-        browser.close()
-
-        # Find all listing links
         links = soup.find_all("a", href=lambda h: h and "MPListing?lid" in h)
 
         results = []
@@ -66,30 +63,25 @@ def run_scraper(keyword: str):
             name = link.get_text(strip=True)
             detail_url = BASE_URL + link["href"]
 
-            # Keyword match on NAME ONLY (simple)
+            # Simple keyword search on the name
             if keyword.lower() in name.lower():
-                print(f"Matched: {name}")
 
-                # Load full detail page HTML
-                raw_html = scrape_listing_details(detail_url)
+                # Load full detail page HTML asynchronously
+                full_html = await scrape_listing_details(detail_url)
 
                 results.append({
                     "name": name,
-                    "provider": "",   # Optional enhancement later
+                    "provider": "",
                     "url": detail_url,
-                    "raw_html": raw_html
+                    "raw_html": full_html
                 })
 
         return results
 
 
 @app.get("/search")
-def search(keyword: str):
-    """
-    Example:
-    /search?keyword=AP Automation
-    """
-    return run_scraper(keyword)
+async def search(keyword: str):
+    return await run_scraper(keyword)
 
 
 if __name__ == "__main__":
