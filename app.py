@@ -1,9 +1,10 @@
 from fastapi import FastAPI
+from playwright.sync_api import sync_playwright
 import requests
 from bs4 import BeautifulSoup
 import uvicorn
 
-# 🔹 Use the FULL marketplace, not just the UKI category
+
 MARKETPLACE_URL = "https://marketplace.intacct.com/marketplace"
 BASE_URL = "https://marketplace.intacct.com"
 
@@ -16,34 +17,43 @@ def home():
 
 
 def clean_text(text: str) -> str:
-    """Squash whitespace so the text is Copilot-friendly."""
     return " ".join(text.split())
 
 
 # ---------------------------------------------------------
-# Scrape LIST page (full marketplace)
+# STEP 1 — Load ALL listings using Playwright (JS-enabled)
 # ---------------------------------------------------------
-def get_listing_urls():
-    """
-    Scrape the main marketplace page and collect ALL listing URLs.
-    We look for any <a> whose href contains 'MPListing?lid='.
-    """
-    headers = {
-        "User-Agent": "CN-Intacct-MP-Scraper/1.0 (+https://cn-intacct-mp-scraper.onrender.com)"
-    }
+def get_all_listings():
+    listings = {}
 
-    resp = requests.get(MARKETPLACE_URL, timeout=30, headers=headers)
-    resp.raise_for_status()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+        page.goto(MARKETPLACE_URL, timeout=60000)
+        page.wait_for_load_state("networkidle")
 
-    listings_by_url = {}
+        # Scroll multiple times to ensure ALL cards load
+        last_height = 0
+        while True:
+            page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+            page.wait_for_timeout(800)
+            new_height = page.evaluate("document.body.scrollHeight")
+
+            if new_height == last_height:
+                break
+
+            last_height = new_height
+
+        html = page.content()
+        browser.close()
+
+    soup = BeautifulSoup(html, "html.parser")
 
     for a in soup.find_all("a", href=True):
         href = a["href"]
 
         if "MPListing?lid=" in href:
-            # Normalise URL
             if href.startswith("http"):
                 url = href
             else:
@@ -52,99 +62,72 @@ def get_listing_urls():
             name = a.get_text(strip=True)
 
             # De-dupe by URL
-            listings_by_url[url] = {
+            listings[url] = {
                 "name": name,
                 "url": url,
             }
 
-    return list(listings_by_url.values())
+    return list(listings.values())
 
 
 # ---------------------------------------------------------
-# Scrape DETAIL page (no JS, plain requests)
+# STEP 2 — Scrape detail page with requests (safe + fast)
 # ---------------------------------------------------------
 def scrape_detail_page(url: str):
-    """
-    Load a single listing detail page and extract:
-    - provider (from 'by:' text)
-    - approved_countries (from 'Integration Approved Countries')
-    - full flattened text
-    """
-    headers = {
-        "User-Agent": "CN-Intacct-MP-Scraper/1.0 (+https://cn-intacct-mp-scraper.onrender.com)"
-    }
-
     try:
-        resp = requests.get(url, timeout=30, headers=headers)
-        resp.raise_for_status()
-
+        resp = requests.get(url, timeout=30)
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Full flattened text for Copilot to work with
         text_content = clean_text(soup.get_text(" ", strip=True))
 
-        # ----- Provider -----
+        # Provider
         provider = ""
         provider_tag = soup.find(string=lambda x: isinstance(x, str) and "by:" in x.lower())
         if provider_tag:
-            # e.g. "... by: Tipalti" → "Tipalti"
             provider = provider_tag.split("by:")[-1].strip()
 
-        # ----- Approved countries -----
+        # Approved Countries
         approved = []
         for strong in soup.find_all("strong"):
-            label = strong.get_text(strip=True)
-            if "Integration Approved Countries" in label:
+            if "Integration Approved Countries" in strong.get_text():
                 parent_text = strong.parent.get_text(" ", strip=True)
-                # e.g. "Integration Approved Countries: Canada; United Kingdom; United States"
                 if ":" in parent_text:
-                    countries_part = parent_text.split(":", 1)[1]
                     approved = [
-                        c.strip()
-                        for c in countries_part.split(";")
-                        if c.strip()
+                        part.strip()
+                        for part in parent_text.split(":")[1].split(";")
+                        if part.strip()
                     ]
 
         return {
             "provider": provider,
             "approved_countries": approved,
-            "text": text_content,
+            "text": text_content
         }
 
     except Exception as e:
-        # Fail soft so the connector still returns something
         return {
             "provider": "",
             "approved_countries": [],
-            "text": f"Error loading detail page: {e}",
+            "text": f"Error loading detail page: {e}"
         }
 
 
 # ---------------------------------------------------------
-# Main search endpoint
+# STEP 3 — Search endpoint
 # ---------------------------------------------------------
 @app.get("/search")
 def search(keyword: str):
-    """
-    Keyword search over listing NAMES.
+    keyword = keyword.lower()
 
-    - We first scrape ALL listing URLs from the main marketplace page.
-    - Then we filter by keyword in the listing name (case-insensitive).
-    - For each match we load the detail page and enrich with provider,
-      approved_countries and full text.
-    """
-    keyword_lower = keyword.lower()
+    # Fetch ALL listings now (JavaScript included)
+    all_listings = get_all_listings()
 
-    # 1️⃣ Get all listing URLs from the main marketplace
-    all_listings = get_listing_urls()
-
-    # 2️⃣ Filter by keyword in the listing NAME
+    # Match by keyword in the listing *name*
     matched = [
         item for item in all_listings
-        if keyword_lower in item["name"].lower()
+        if keyword in item["name"].lower()
     ]
 
-    # 3️⃣ Enrich with detail page info
     results = []
     for item in matched:
         details = scrape_detail_page(item["url"])
