@@ -3,8 +3,12 @@ import requests
 from bs4 import BeautifulSoup
 import uvicorn
 
-UKI_URL = "https://marketplace.intacct.com/marketplace?category=a2C0H000005kXtUUAU"
+SEARCH_URL = "https://marketplace.intacct.com/marketplace?keyword="
 BASE_URL = "https://marketplace.intacct.com"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
 
 app = FastAPI()
 
@@ -18,10 +22,11 @@ def clean_text(text: str):
 
 
 # ---------------------------------------------------------
-# Scrape LIST page (no JS required)
+# Scrape LISTINGS by keyword (server-side!! No JS needed)
 # ---------------------------------------------------------
-def get_listing_urls():
-    resp = requests.get(UKI_URL, timeout=30)
+def get_listing_urls(keyword: str):
+    url = SEARCH_URL + keyword.replace(" ", "%20")
+    resp = requests.get(url, headers=HEADERS, timeout=30)
     soup = BeautifulSoup(resp.text, "html.parser")
 
     listings = []
@@ -31,29 +36,26 @@ def get_listing_urls():
         if "MPListing?lid=" in href:
             name = a.get_text(strip=True)
             url = BASE_URL + href
-
             listings.append({"name": name, "url": url})
 
     return listings
 
 
 # ---------------------------------------------------------
-# Scrape DETAIL page (no JS required)
+# Scrape DETAIL page for provider, countries & full text
 # ---------------------------------------------------------
 def scrape_detail_page(url: str):
     try:
-        resp = requests.get(url, timeout=30)
+        resp = requests.get(url, headers=HEADERS, timeout=30)
         soup = BeautifulSoup(resp.text, "html.parser")
 
         text_content = clean_text(soup.get_text(" ", strip=True))
 
-        # Find provider
         provider = ""
         provider_tag = soup.find(string=lambda x: x and "by:" in x.lower())
         if provider_tag:
             provider = provider_tag.split("by:")[-1].strip()
 
-        # Find approved countries
         approved = []
         for strong in soup.find_all("strong"):
             if "Integration Approved Countries" in strong.get_text():
@@ -76,21 +78,17 @@ def scrape_detail_page(url: str):
 
 
 # ---------------------------------------------------------
-# Main search endpoint
+# MAIN search endpoint
 # ---------------------------------------------------------
 @app.get("/search")
 def search(keyword: str):
     keyword = keyword.lower()
 
-    all_listings = get_listing_urls()
-
-    matched = [item for item in all_listings if keyword in item["name"].lower()]
+    all_listings = get_listing_urls(keyword)
 
     results = []
-
-    for item in matched:
+    for item in all_listings:
         details = scrape_detail_page(item["url"])
-
         results.append({
             "name": item["name"],
             "provider": details["provider"],
