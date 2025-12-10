@@ -1,10 +1,11 @@
 from fastapi import FastAPI
 import requests
 from bs4 import BeautifulSoup
+import json
 import uvicorn
 
-# Marketplace hidden API returning ALL listings globally
-GLOBAL_API = "https://marketplace.intacct.com/servlet/servlet.GetListingData"
+MARKETPLACE_URL = "https://marketplace.intacct.com/marketplace"
+BASE_URL = "https://marketplace.intacct.com"
 
 app = FastAPI()
 
@@ -17,43 +18,48 @@ def clean_text(text: str):
     return " ".join(text.split())
 
 
+# ---------------------------------------------------------
+# Extract all listings from the main Marketplace HTML
+# ---------------------------------------------------------
 def get_all_listings():
-    """
-    Calls the internal Marketplace API (no JS needed)
-    Returns ALL listings globally
-    """
     try:
-        resp = requests.get(GLOBAL_API, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+        resp = requests.get(MARKETPLACE_URL, timeout=30)
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # The marketplace embeds JSON inside <script id="listingData">
+        script_tag = soup.find("script", id="listingData")
+
+        if not script_tag:
+            return []
+
+        raw_json = script_tag.string.strip()
+        data = json.loads(raw_json)
 
         listings = []
-
         for item in data.get("data", []):
             listings.append({
                 "name": item.get("name", "").strip(),
-                "url": item.get("url", "").strip(),
-                "provider": item.get("vendor", "").strip(),
+                "provider": item.get("vendorName", "").strip(),
+                "url": BASE_URL + "/MPListing?lid=" + item.get("listingId", "")
             })
 
         return listings
 
     except Exception as e:
+        print("Error loading marketplace data:", e)
         return []
 
 
+# ---------------------------------------------------------
+# Scrape DETAIL PAGE text + approved countries
+# ---------------------------------------------------------
 def scrape_detail_page(url: str):
-    """
-    Loads the full text of the listing detail page (no JS required)
-    Extracts text + approved countries section
-    """
     try:
         resp = requests.get(url, timeout=30)
         soup = BeautifulSoup(resp.text, "html.parser")
 
         full_text = clean_text(soup.get_text(" ", strip=True))
 
-        # Extract approved countries
         approved = []
         for strong in soup.find_all("strong"):
             if "Integration Approved Countries" in strong.get_text():
@@ -63,30 +69,33 @@ def scrape_detail_page(url: str):
 
         return {
             "text": full_text,
-            "approved_countries": approved,
+            "approved_countries": approved
         }
 
-    except Exception:
+    except Exception as e:
         return {
-            "text": "",
+            "text": f"Failed to load details: {e}",
             "approved_countries": []
         }
 
 
+# ---------------------------------------------------------
+# Keyword search endpoint
+# ---------------------------------------------------------
 @app.get("/search")
 def search(keyword: str):
     keyword = keyword.lower()
 
-    # Get ALL marketplace listings globally
     all_listings = get_all_listings()
 
-    # Keyword match happens here (Copilot will filter further)
+    # Keyword match only
     matched = [
         item for item in all_listings
         if keyword in item["name"].lower()
     ]
 
     results = []
+
     for item in matched:
         details = scrape_detail_page(item["url"])
         results.append({
